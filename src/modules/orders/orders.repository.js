@@ -1,0 +1,106 @@
+const BaseModel = require('../../database/BaseModel');
+const pool = require('../../database/connection');
+const queries = require('./orders.sql');
+
+class OrdersRepository extends BaseModel {
+  constructor() {
+    super('orders');
+  }
+
+  async findWithItems(filters = {}) {
+    let sql = queries.findWithItems;
+    const params = [];
+
+    if (filters.status) {
+      sql += ` AND o.order_status = ?`;
+      params.push(filters.status);
+    }
+
+    if (filters.paymentStatus) {
+      sql += ` AND o.payment_status = ?`;
+      params.push(filters.paymentStatus);
+    }
+
+    if (filters.customerId) {
+      sql += ` AND o.customer_id = ?`;
+      params.push(filters.customerId);
+    }
+
+    if (filters.userId) {
+      sql += ` AND o.user_id = ?`;
+      params.push(filters.userId);
+    }
+
+    if (filters.tableId) {
+      sql += ` AND o.table_id = ?`;
+      params.push(filters.tableId);
+    }
+
+    sql += ` ORDER BY o.createdAt DESC LIMIT 50`;
+
+    const [rows] = await pool.execute(sql, params);
+    
+    if (rows.length === 0) return [];
+
+    const orderIds = rows.map(r => r.id);
+    const placeholders = orderIds.map(() => '?').join(',');
+    const [itemsRows] = await pool.execute(`
+      SELECT oi.order_id, oi.id, oi.menu_item_id, mi.item_name, mi.image,
+             oi.quantity, oi.unit_price, oi.total_price, oi.kitchen_status,
+             oi.addons, oi.size_name, oi.size_price
+      FROM order_items oi
+      LEFT JOIN menu_items mi ON oi.menu_item_id = mi.id
+      WHERE oi.order_id IN (${placeholders}) AND oi.deletedAt IS NULL
+    `, orderIds);
+
+    const itemsByOrder = itemsRows.reduce((acc, item) => {
+      if (!acc[item.order_id]) acc[item.order_id] = [];
+      
+      // Resolve custom name from addons
+      if (!item.item_name && item.addons) {
+        try {
+          const parsed = typeof item.addons === 'string' ? JSON.parse(item.addons) : item.addons;
+          if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].name) {
+            item.item_name = parsed[0].name;
+          }
+        } catch (e) {
+          console.error("Error parsing addons for custom item", e);
+        }
+      }
+      
+      acc[item.order_id].push(item);
+      return acc;
+    }, {});
+
+    return rows.map(row => ({
+      ...row,
+      items: itemsByOrder[row.id] || []
+    }));
+  }
+
+  async getOrderWithItems(id) {
+    const [order] = await pool.execute(queries.getOrderById, [id]);
+
+    if (order.length === 0) return null;
+
+    const [items] = await pool.execute(queries.getOrderItems, [id]);
+    
+    const mappedItems = items.map(item => {
+      if (!item.item_name && item.addons) {
+        try {
+          const parsed = typeof item.addons === 'string' ? JSON.parse(item.addons) : item.addons;
+          if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].name) {
+            item.item_name = parsed[0].name;
+          }
+        } catch (e) {
+          console.error("Error parsing addons in getOrderWithItems", e);
+        }
+      }
+      return item;
+    });
+
+    return { ...order[0], items: mappedItems };
+  }
+}
+
+module.exports = new OrdersRepository();
